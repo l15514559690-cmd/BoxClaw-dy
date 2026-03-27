@@ -1,0 +1,6 @@
+# 若系统没有 pip 命令，请用：python3 -m pip install -r requirements.txt
+# PyPI 包名：PySide6-Fluent-Widgets（部分文档写作 qfluentwidgets + PySide6）
+# 可选完整依赖：python3 -m pip install "PySide6-Fluent-Widgets[full]"
+PySide6>=6.6.0
+PySide6-Addons>=6.6.0
+PySide6-Fluent-Widgets>=1.7.0
