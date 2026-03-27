@@ -1,0 +1,36 @@
+name: Build BoxClaw Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: # 允许你手动点击按钮触发打包
+
+jobs:
+  build:
+    runs-on: windows-latest # 借用一台顶配的 Windows 服务器
+
+    steps:
+    - name: 获取最新代码
+      uses: actions/checkout@v4
+
+    - name: 配置 Python 环境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11' # 使用稳定的 Python 3.11
+
+    - name: 安装核心依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -r requirements.txt
+
+    - name: 使用 PyInstaller 打包 EXE
+      run: |
+        # 使用 --onedir 模式，这对带浏览器的桌面软件最友好，启动快且稳定
+        pyinstaller --noconfirm --onedir --windowed --name "BoxClaw" boxclaw_main.py
+
+    - name: 上传成品供下载
+      uses: actions/upload-artifact@v4
+      with:
+        name: BoxClaw-Windows-Ready
+        path: dist/BoxClaw/ # 将打包好的整个文件夹上传
