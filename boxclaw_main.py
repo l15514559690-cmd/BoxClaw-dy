@@ -2298,10 +2298,11 @@ class OpenClawWebPage(BoxClawPage):
         super().__init__(parent)
         self._manager = manager
         self._discover_worker: Optional[_DiscoverOpenClawPanelWorker] = None
+        self._view: Optional[QWebEngineView] = None
         self.setObjectName("openclawWebInterface")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, PAGE_TOP_INSET_FOR_TITLEBAR + 4, 10, 0)
-        layout.setSpacing(10)
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(10, PAGE_TOP_INSET_FOR_TITLEBAR + 4, 10, 0)
+        self._root_layout.setSpacing(10)
 
         bar = QFrame(self)
         bar.setObjectName("openclawWebBar")
@@ -2316,12 +2317,24 @@ class OpenClawWebPage(BoxClawPage):
         self._btn_grab.clicked.connect(self._on_grab_gateway)
         hl.addWidget(self._btn_grab)
 
-        self._view = QWebEngineView(self)
+        # 延迟创建 QWebEngineView：启动即加载 WebEngine 在 Windows 打包环境下易闪退（子进程/沙箱）
+        self._webview_host = QWidget(self)
+        whl = QVBoxLayout(self._webview_host)
+        whl.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.addWidget(bar, 0)
+        self._root_layout.addWidget(self._webview_host, 1)
+
+    def ensure_webview(self) -> None:
+        if self._view is not None:
+            return
+        self._view = QWebEngineView(self._webview_host)
+        lay = self._webview_host.layout()
+        if lay is not None:
+            lay.addWidget(self._view)
         self._view.setUrl(QUrl(OPENCLAW_PANEL_URL))
-        layout.addWidget(bar, 0)
-        layout.addWidget(self._view, 1)
 
     def _on_grab_gateway(self) -> None:
+        self.ensure_webview()
         if self._discover_worker is not None and self._discover_worker.isRunning():
             return
         self._btn_grab.setEnabled(False)
@@ -2346,7 +2359,9 @@ class OpenClawWebPage(BoxClawPage):
                 position=InfoBarPosition.TOP,
             )
             return
-        self._view.setUrl(QUrl(url))
+        self.ensure_webview()
+        if self._view is not None:
+            self._view.setUrl(QUrl(url))
         InfoBar.success(
             "已打开控制台",
             url,
@@ -2777,11 +2792,19 @@ class BoxClawWindow(_BaseMainWindow):
         qrouter.setDefaultRouteKey(self.stackedWidget, self.home_welcome.objectName())
         self.switchTo(self.home_welcome)
 
+        self.stackedWidget.currentChanged.connect(self._on_stack_interface_changed)
+
         nav = self.navigationInterface
         if hasattr(nav, "setCollapsible"):
             nav.setCollapsible(False)
         if hasattr(nav, "expand"):
             nav.expand(useAni=False)
+
+    def _on_stack_interface_changed(self, index: int) -> None:
+        """仅在进入「龙虾控制台」时创建 WebEngine，避免启动阶段加载 Chromium 导致 Windows 闪退。"""
+        w = self.stackedWidget.widget(index)
+        if w is self.openclaw_web:
+            self.openclaw_web.ensure_webview()
 
     def _init_tray(self) -> None:
         self._tray = QSystemTrayIcon(self)
@@ -2824,6 +2847,9 @@ def main() -> None:
             "QTWEBENGINE_CHROMIUM_FLAGS",
             "--disable-background-timer-throttling",
         )
+    elif sys.platform == "win32":
+        # Windows 下打包或部分环境 Chromium 子进程沙箱会导致进程立即退出（表现为双击 exe 闪退）
+        os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
     app = QApplication(sys.argv)
     app.setApplicationName("BoxClaw🦞抖音矩阵控制台—by尖叫")
@@ -2845,5 +2871,37 @@ def main() -> None:
     sys.exit(app.exec())
 
 
+def _write_startup_crash_log() -> Path:
+    base = Path.home() / ".boxclaw"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        base = Path.home()
+    log = base / "startup_error.log"
+    try:
+        import traceback
+
+        log.write_text(traceback.format_exc(), encoding="utf-8")
+    except OSError:
+        pass
+    return log
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log_path = _write_startup_crash_log()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                ctypes.windll.user32.MessageBoxW(
+                    0,
+                    f"启动失败，详情见：\n{log_path}",
+                    "BoxClaw",
+                    0x10,
+                )
+            except Exception:
+                pass
+        raise
