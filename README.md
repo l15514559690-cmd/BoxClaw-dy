@@ -1,6 +1,7 @@
 # BoxClaw
 
 > 原「抖音多开矩阵」by 尖叫（Todliu）（仅供学习参考）
+<img width="1280" height="832" alt="image" src="https://github.com/user-attachments/assets/448f22c2-cf65-4b73-9f87-71157b458049" />
 
 **正式入口为单文件** [`boxclaw_main.py`](boxclaw_main.py)：Fluent Design（qfluentwidgets）外壳 + **抖音多账号 WebEngine 沙盒** + **OpenClaw 网关**（子进程、底部终端、内嵌 Web 控制台）在同一进程内。
 
