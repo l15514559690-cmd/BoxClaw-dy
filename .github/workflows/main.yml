@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest # 借用一台顶配的 Windows 服务器
+    runs-on: windows-latest # 借用 GitHub 的 Windows 顶配服务器
 
     steps:
     - name: 获取最新代码
@@ -24,13 +24,21 @@ jobs:
         pip install pyinstaller
         pip install -r requirements.txt
 
-    - name: 使用 PyInstaller 打包 EXE
+    - name: 使用 PyInstaller 打包 EXE (注入终极收集指令)
       run: |
-        # 使用 --onedir 模式，这对带浏览器的桌面软件最友好，启动快且稳定
-        pyinstaller --noconfirm --onedir --windowed --name "BoxClaw" boxclaw_main.py
+        # 强制收集 Flask、WebEngine 内核以及 qfluentwidgets 的所有 UI 皮肤与资源
+        pyinstaller --noconfirm --onedir --windowed --name "BoxClaw" --hidden-import=PySide6.QtWebEngineCore --hidden-import=PySide6.QtWebEngineWidgets --hidden-import=flask --collect-all=qfluentwidgets boxclaw_main.py
+
+    - name: 补充拷贝 WebEngine 核心资源 (Windows 防闪退关键)
+      # 强行把 Chromium 的底层依赖拷贝进打包成品目录，防止软件运行时找不到内核而闪退
+      run: |
+        xcopy /E /I /Y "C:\hostedtoolcache\windows\Python\3.11.*\x64\Lib\site-packages\PySide6\QtWebEngineCore.pyd" "dist\BoxClaw\"
+        xcopy /E /I /Y "C:\hostedtoolcache\windows\Python\3.11.*\x64\Lib\site-packages\PySide6\QtWebEngineProcess.exe" "dist\BoxClaw\"
+        xcopy /E /I /Y "C:\hostedtoolcache\windows\Python\3.11.*\x64\Lib\site-packages\PySide6\resources" "dist\BoxClaw\resources"
+      continue-on-error: true
 
     - name: 上传成品供下载
       uses: actions/upload-artifact@v4
       with:
         name: BoxClaw-Windows-Ready
-        path: dist/BoxClaw/ # 将打包好的整个文件夹上传
+        path: dist/BoxClaw/ # 将打包好的整个文件夹打包成 zip 供你下载
