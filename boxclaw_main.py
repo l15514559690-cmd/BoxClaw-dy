@@ -89,15 +89,24 @@ def write_main_openclaw_config(data: dict[str, Any]) -> None:
 
 
 def _resolve_openclaw_cli_base() -> list[str]:
+    """解析 openclaw CLI；打包为 exe 时禁止回退到 sys.executable，避免无限自启。"""
     exe = shutil.which("openclaw")
     if exe:
         return [exe]
-    return [sys.executable, "-m", "openclaw"]
+    if sys.platform == "win32":
+        pf = os.environ.get("APPDATA", "")
+        fallback = os.path.join(pf, "npm", "openclaw.cmd")
+        if os.path.isfile(fallback):
+            return [fallback]
+    return []
 
 
 def run_openclaw_config_validate() -> tuple[bool, str]:
     """调用 `openclaw config validate`，失败时返回 stderr/stdout 摘要。无 CLI 时跳过校验。"""
-    cmd = _resolve_openclaw_cli_base() + ["config", "validate"]
+    base = _resolve_openclaw_cli_base()
+    if not base:
+        return True, "(跳过校验: 未找到 openclaw CLI)"
+    cmd = base + ["config", "validate"]
     try:
         r = subprocess.run(
             cmd,
@@ -777,11 +786,16 @@ class OpenClawProcessManager(QObject):
         return True
 
     def _resolve_openclaw_start_cmd(self) -> list[str] | None:
-        # 打包后优先直接使用内置命令入口；若命令不可用再降级到当前 Python 模块启动
         exe = shutil.which("openclaw")
         if exe:
             return [exe, "gateway", "run"]
-        return [sys.executable, "-m", "openclaw", "gateway", "run"]
+        if sys.platform == "win32":
+            pf = os.environ.get("APPDATA", "")
+            fallback = os.path.join(pf, "npm", "openclaw.cmd")
+            if os.path.isfile(fallback):
+                return [fallback, "gateway", "run"]
+        # 打包成 exe 后绝不能返回 sys.executable，否则会无限启动自身
+        return None
 
     @staticmethod
     def _looks_like_adoption(text: str) -> bool:
@@ -944,6 +958,10 @@ class OpenClawProcessManager(QObject):
         self._running_state_emitted = False
         cmd = self._resolve_openclaw_start_cmd()
         if not cmd:
+            self.log_ready.emit(
+                "[OpenClaw] 未找到 openclaw（打包环境禁止用本程序 exe 启动网关）。"
+                "请安装 Node 后执行 `npm install -g openclaw`，或确保 PATH / %APPDATA%\\npm\\openclaw.cmd 可用。"
+            )
             self.state_changed.emit(False)
             return
         try:
@@ -1033,7 +1051,12 @@ class OpenClawProcessManager(QObject):
         exe = shutil.which("openclaw")
         if exe:
             return [exe]
-        return [sys.executable, "-m", "openclaw"]
+        if sys.platform == "win32":
+            pf = os.environ.get("APPDATA", "")
+            fallback = os.path.join(pf, "npm", "openclaw.cmd")
+            if os.path.isfile(fallback):
+                return [fallback]
+        return []
 
     @staticmethod
     def _first_existing_path(candidates: list[Optional[str]]) -> Optional[str]:
@@ -1235,8 +1258,13 @@ class OpenClawProcessManager(QObject):
     def restart_gateway(self) -> None:
         """先 gateway stop，再 gateway run，以取回完整控制权。"""
         self.stop_service()
+        cli = self._resolve_openclaw_cli()
+        if not cli:
+            self.log_ready.emit("[BoxClaw 🦞] 未找到 openclaw，无法执行 gateway stop，将直接尝试启动网关")
+            QTimer.singleShot(1500, self.start_service)
+            return
         self.log_ready.emit("[BoxClaw 🦞] 正在执行 openclaw gateway stop …")
-        stop_cmd = self._resolve_openclaw_cli() + ["gateway", "stop"]
+        stop_cmd = cli + ["gateway", "stop"]
         t = _CmdLogThread(stop_cmd)
         t.line_ready.connect(self.log_ready.emit)
 
@@ -1252,8 +1280,11 @@ class OpenClawProcessManager(QObject):
         t.start()
 
     def run_doctor(self) -> None:
-        cmd = self._resolve_openclaw_cli() + ["doctor"]
-        self.run_command_and_log(cmd)
+        cli = self._resolve_openclaw_cli()
+        if not cli:
+            self.log_ready.emit("[OpenClaw] 未找到 openclaw CLI，无法运行 doctor")
+            return
+        self.run_command_and_log(cli + ["doctor"])
 
     def send_command(self, cmd: str) -> None:
         """将用户命令写入 OpenClaw 进程 stdin。"""
@@ -2880,29 +2911,19 @@ class BoxClawWindow(_BaseMainWindow):
 
 
 def main() -> None:
-    # QtWebEngine 与其它 OpenGL 组件共存时必须在 QApplication 之前设置（降低 macOS 随机闪退）
+    # 1. 降低 macOS 随机闪退风险（QtWebEngine 与其它 OpenGL 组件共存）
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
-    if sys.platform == "darwin":
-        # 可按需取消注释排查 GPU/沙箱相关崩溃
-        # os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
-        # 减轻后台/休眠时 Chromium 定时器与 WebView 的竞态（可按需调整或清空）
-        os.environ.setdefault(
-            "QTWEBENGINE_CHROMIUM_FLAGS",
-            "--disable-background-timer-throttling",
+
+    # 2. 打包后必须全局禁用 Chromium 沙箱，否则 QtWebEngineProcess 易与权限冲突闪退
+    os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+
+    # 3. 按平台分配 Chromium 参数，减轻与 qfluentwidgets / DWM 的 GPU 争用与白屏死锁
+    if sys.platform == "win32":
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+            "--disable-gpu --disable-software-rasterizer"
         )
-    elif sys.platform == "win32":
-        # Windows 下打包或部分环境 Chromium 子进程沙箱会导致进程立即退出（表现为双击 exe 闪退）
-        os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
-        # 部分显卡驱动下 GPU 进程与 Qt6 WebEngine 组合会冻结后崩溃，可按需启用：
-        # set BOXCLAW_WEBENGINE_DISABLE_GPU=1
-        if os.environ.get("BOXCLAW_WEBENGINE_DISABLE_GPU", "").strip() in (
-            "1",
-            "true",
-            "yes",
-        ):
-            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-                os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip() + " --disable-gpu"
-            ).strip()
+    elif sys.platform == "darwin":
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-background-timer-throttling"
 
     app = QApplication(sys.argv)
     app.setApplicationName("BoxClaw🦞抖音矩阵控制台—by尖叫")
