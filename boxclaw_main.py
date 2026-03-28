@@ -27,6 +27,7 @@ from typing import Any, NamedTuple, Optional, Union
 
 PROFILES_BASE_DIR = Path.home() / "Douyin_Profiles"
 START_URL = "https://creator.douyin.com/"
+DOU_HOT_URL = "https://douhot.douyin.com/"
 MAX_ACCOUNTS = 50
 APP_NAME = "BoxClaw🦞抖音矩阵控制台—by尖叫"
 APP_SUBTITLE = "by \u5c16\u53eb\uff08\u4ec5\u4f9b\u5b66\u4e60\u53c2\u8003\uff09"
@@ -1635,14 +1636,17 @@ class MatrixPage(BoxClawPage):
         nav_bar.addWidget(self.btn_refresh)
         self.btn_creator = PushButton("抖音创作者中心", self)
         self.btn_main = PushButton("抖音主站", self)
+        self.btn_hot = PushButton("抖音热点宝", self)
         nav_bar.addWidget(self.btn_creator)
         nav_bar.addWidget(self.btn_main)
+        nav_bar.addWidget(self.btn_hot)
         nav_bar.addStretch()
         self.btn_back.clicked.connect(self._nav_back)
         self.btn_forward.clicked.connect(self._nav_forward)
         self.btn_refresh.clicked.connect(self._nav_refresh)
         self.btn_creator.clicked.connect(self._nav_to_creator)
         self.btn_main.clicked.connect(self._nav_to_main)
+        self.btn_hot.clicked.connect(self._nav_to_hot)
         layout.addLayout(nav_bar)
 
         self.matrix_container = QWidget(self)
@@ -1742,6 +1746,11 @@ class MatrixPage(BoxClawPage):
         v = self._get_current_view()
         if v:
             v.load(QUrl("https://www.douyin.com/"))
+
+    def _nav_to_hot(self) -> None:
+        v = self._get_current_view()
+        if v:
+            v.load(QUrl(DOU_HOT_URL))
 
     def _add_account(self) -> None:
         raw, ok = QInputDialog.getText(self, "添加账号", "账号目录名（将创建在 ~/Douyin_Profiles 下）：")
