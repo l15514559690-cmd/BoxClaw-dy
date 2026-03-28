@@ -2911,32 +2911,64 @@ class BoxClawWindow(_BaseMainWindow):
 
 
 def main() -> None:
-    # 1. 降低 macOS 随机闪退风险（QtWebEngine 与其它 OpenGL 组件共存）
+    import io
+    import sys
+    import os
+
+    # 【终极救命补丁 1】：解决 --windowed 无黑框模式下，Flask 和 WebEngine 打印日志导致的“窒息闪退”
+    if sys.stdout is None:
+        sys.stdout = io.StringIO()
+    if sys.stderr is None:
+        sys.stderr = io.StringIO()
+
+    # 【终极救命补丁 2】：强制软件渲染 UI，彻底解决“不开兼容模式就进不去”的 GPU 渲染崩溃！
+    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 
-    # 2. 打包后必须全局禁用 Chromium 沙箱，否则 QtWebEngineProcess 易与权限冲突闪退
+    # 【终极救命补丁 3】：关闭沙箱，并强行给打包后“迷路”的 WebEngine 内核指明绝对路径
     os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
-
-    # 3. 按平台分配 Chromium 参数，减轻与 qfluentwidgets / DWM 的 GPU 争用与白屏死锁
     if sys.platform == "win32":
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-            "--disable-gpu --disable-software-rasterizer"
-        )
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu"
+
+        # 针对 PyInstaller 打包后的路径修复
+        if getattr(sys, "frozen", False):
+            base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+            # 兼容不同 PyInstaller 版本的 _internal 目录结构
+            internal_dir = (
+                os.path.join(base_dir, "_internal")
+                if os.path.exists(os.path.join(base_dir, "_internal"))
+                else base_dir
+            )
+            pyside_dir = os.path.join(internal_dir, "PySide6")
+
+            os.environ["QTWEBENGINEPROCESS_PATH"] = os.path.join(
+                pyside_dir, "QtWebEngineProcess.exe"
+            )
+            os.environ["QTWEBENGINE_LOCALES_PATH"] = os.path.join(pyside_dir, "locales")
+            os.environ["QTWEBENGINE_RESOURCES_PATH"] = os.path.join(
+                pyside_dir, "resources"
+            )
+
     elif sys.platform == "darwin":
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-background-timer-throttling"
 
     app = QApplication(sys.argv)
-    app.setApplicationName("BoxClaw🦞抖音矩阵控制台—by尖叫")
+    app.setApplicationName("BoxClaw")
     app.setOrganizationName("BoxClaw")
     app.setQuitOnLastWindowClosed(False)
 
-    # 全局暗夜主题（Fluent Dark + 壳体自定义深色样式）
-    setTheme(Theme.DARK, save=False)
+    # 全局浅色主题
+    setTheme(Theme.LIGHT, save=False)
 
     win = BoxClawWindow()
     win.show()
 
-    # Windows 上 Mica + 自定义深色样式常出现侧栏/背景发灰白或与合成器冲突，默认关闭 Mica
+    # 【终极救命补丁 4】：彻底注释掉 Mica 特效，防止在不支持的 Windows 版本上触发 C++ 级闪退
+    # if sys.platform == "win32":
+    #     try:
+    #         win.setMicaEffectEnabled(True)
+    #     except Exception:
+    #         pass
 
     sys.exit(app.exec())
 
