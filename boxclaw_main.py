@@ -12,6 +12,7 @@ macOS 使用 SplitFluentWindow（侧栏树形导航）；Windows/Linux 使用 MS
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import os
 import platform
@@ -567,6 +568,12 @@ from qfluentwidgets import (
 from qfluentwidgets.components.navigation import NavigationInterface
 
 
+@functools.lru_cache(maxsize=1)
+def _cached_qfont_families() -> frozenset[str]:
+    """枚举系统字体较慢（Windows 上可达数秒），侧栏图标会调用多次，必须只查一次。"""
+    return frozenset(QFontDatabase.families())
+
+
 def emoji_navigation_icon(emoji: str, size: int = 16) -> QIcon:
     """将 emoji 转为 QIcon。
 
@@ -580,18 +587,22 @@ def emoji_navigation_icon(emoji: str, size: int = 16) -> QIcon:
         QPainter.RenderHint.TextAntialiasing | QPainter.RenderHint.SmoothPixmapTransform
     )
     font = QFont()
-    fams = set(QFontDatabase.families())
-    for name in (
-        "Apple Color Emoji",
-        "Segoe UI Emoji",
-        "Noto Color Emoji",
-        "Segoe UI Symbol",
-    ):
-        if name in fams:
-            font.setFamily(name)
-            break
+    # Windows 优先 Segoe UI Emoji，避免先全量扫描 families（曾导致界面假死）
+    if sys.platform == "win32":
+        font.setFamily("Segoe UI Emoji")
     else:
-        font.setStyleHint(QFont.StyleHint.SansSerif)
+        fams = _cached_qfont_families()
+        for name in (
+            "Apple Color Emoji",
+            "Segoe UI Emoji",
+            "Noto Color Emoji",
+            "Segoe UI Symbol",
+        ):
+            if name in fams:
+                font.setFamily(name)
+                break
+        else:
+            font.setStyleHint(QFont.StyleHint.SansSerif)
     font.setPixelSize(max(11, size - 3))
     p.setFont(font)
     p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, emoji)
@@ -1647,6 +1658,15 @@ class MatrixPage(BoxClawPage):
         layout.addWidget(self.matrix_container, stretch=1)
 
         core.accounts_changed.connect(self._refresh_account_combo)
+        # 磁盘上已有账号时，构造 MatrixPage 早于 register 的 emit，需补一次同步（不挂载 WebView）
+        QTimer.singleShot(0, self._refresh_account_combo)
+
+    def _matrix_tab_active(self) -> bool:
+        win = self.window()
+        if win is None:
+            return False
+        sw = getattr(win, "stackedWidget", None)
+        return sw is not None and sw.currentWidget() is self
 
     def _current_dir(self) -> str | None:
         idx = self._combo.currentIndex()
@@ -1670,7 +1690,16 @@ class MatrixPage(BoxClawPage):
         self._combo.blockSignals(True)
         self._combo.setCurrentIndex(new_idx)
         self._combo.blockSignals(False)
-        self._attach_sandbox()
+        # 仅在「抖音矩阵」为当前页时挂载 WebEngine，避免在首页后台启动 Chromium 导致卡顿/闪退
+        if self._matrix_tab_active():
+            self._attach_sandbox()
+
+    def ensure_matrix_sandbox_when_ready(self) -> None:
+        """侧栏切换到本页时调用：补全账号列表并挂载当前账号沙盒。"""
+        if self._core._ordered_accounts and not self._dir_order:
+            self._refresh_account_combo()
+        elif self._dir_order:
+            self._attach_sandbox()
 
     def _on_combo_index_changed(self, index: int) -> None:
         if index < 0 or index >= len(self._dir_order):
@@ -2557,6 +2586,8 @@ class BoxClawWindow(_BaseMainWindow):
 
     def _apply_dark_claw_palette(self) -> None:
         """暗夜紫主壳：紫灰底、大圆角、淡紫边与多色点缀；矩阵区仅容器样式，不改动 WebView 沙盒。"""
+        # Windows 下 rgba 半透明侧栏在关闭 Acrylic/Mica 后易透出底层白底，改用实色
+        _nav_panel_bg = UI_NAV_BG if sys.platform == "darwin" else "#171528"
         if hasattr(self, "setCustomBackgroundColor"):
             self.setCustomBackgroundColor(UI_BG_ROOT, UI_BG_ROOT)
         self.setStyleSheet(
@@ -2568,7 +2599,7 @@ class BoxClawWindow(_BaseMainWindow):
                 background-color: {UI_BG_ROOT};
             }}
             QWidget#boxclawNavPanel {{
-                background-color: {UI_NAV_BG};
+                background-color: {_nav_panel_bg};
                 border-right: 1px solid {UI_BORDER_PURPLE_SOFT};
             }}
             QWidget#terminalPanelHost {{
@@ -2731,8 +2762,9 @@ class BoxClawWindow(_BaseMainWindow):
             nav.setExpandWidth(220)
         if hasattr(nav, "setMinimumExpandWidth"):
             nav.setMinimumExpandWidth(640)
+        # Windows 上 Acrylic 与 Qt/Fluent 深色合成易表现为侧栏发白、卡顿或 GPU 异常；仅 macOS 开启
         if hasattr(nav, "setAcrylicEnabled"):
-            nav.setAcrylicEnabled(True)
+            nav.setAcrylicEnabled(sys.platform == "darwin")
         # 收紧侧栏上下留白，减少「菜单区」与顶栏之间的空洞感
         if isinstance(nav, NavigationInterface):
             panel = nav.panel
@@ -2805,6 +2837,8 @@ class BoxClawWindow(_BaseMainWindow):
         w = self.stackedWidget.widget(index)
         if w is self.openclaw_web:
             self.openclaw_web.ensure_webview()
+        if w is self.matrix:
+            self.matrix.ensure_matrix_sandbox_when_ready()
 
     def _init_tray(self) -> None:
         self._tray = QSystemTrayIcon(self)
@@ -2850,6 +2884,16 @@ def main() -> None:
     elif sys.platform == "win32":
         # Windows 下打包或部分环境 Chromium 子进程沙箱会导致进程立即退出（表现为双击 exe 闪退）
         os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+        # 部分显卡驱动下 GPU 进程与 Qt6 WebEngine 组合会冻结后崩溃，可按需启用：
+        # set BOXCLAW_WEBENGINE_DISABLE_GPU=1
+        if os.environ.get("BOXCLAW_WEBENGINE_DISABLE_GPU", "").strip() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+                os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip() + " --disable-gpu"
+            ).strip()
 
     app = QApplication(sys.argv)
     app.setApplicationName("BoxClaw🦞抖音矩阵控制台—by尖叫")
@@ -2862,11 +2906,7 @@ def main() -> None:
     win = BoxClawWindow()
     win.show()
 
-    if sys.platform == "win32":
-        try:
-            win.setMicaEffectEnabled(True)
-        except Exception:
-            pass
+    # Windows 上 Mica + 自定义深色样式常出现侧栏/背景发灰白或与合成器冲突，默认关闭 Mica
 
     sys.exit(app.exec())
 
