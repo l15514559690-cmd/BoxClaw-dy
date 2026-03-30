@@ -88,6 +88,44 @@ def write_main_openclaw_config(data: dict[str, Any]) -> None:
     )
 
 
+def _win_subprocess_argv(argv: list[str]) -> list[str]:
+    """Windows 下 .cmd/.bat 不能作为 CreateProcess 的首参数，需经 cmd /c，否则网关/CLI 无法启动。"""
+    if sys.platform != "win32" or len(argv) < 1:
+        return argv
+    head = argv[0]
+    if not str(head).lower().endswith((".cmd", ".bat")):
+        return argv
+    return ["cmd", "/c", head] + list(argv[1:])
+
+
+def _apply_windows_frozen_qtwebengine_paths() -> None:
+    """PyInstaller 打包后，为 QtWebEngine 子进程设置资源绝对路径（_internal / 同级多布局）。"""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    candidates: list[str] = []
+    internal = os.path.join(base_dir, "_internal")
+    if os.path.isdir(internal):
+        candidates.append(os.path.join(internal, "PySide6"))
+    candidates.append(os.path.join(base_dir, "PySide6"))
+    seen: set[str] = set()
+    for pyside_dir in candidates:
+        if pyside_dir in seen:
+            continue
+        seen.add(pyside_dir)
+        proc = os.path.join(pyside_dir, "QtWebEngineProcess.exe")
+        if not os.path.isfile(proc):
+            continue
+        os.environ["QTWEBENGINEPROCESS_PATH"] = proc
+        loc = os.path.join(pyside_dir, "locales")
+        if os.path.isdir(loc):
+            os.environ["QTWEBENGINE_LOCALES_PATH"] = loc
+        res = os.path.join(pyside_dir, "resources")
+        if os.path.isdir(res):
+            os.environ["QTWEBENGINE_RESOURCES_PATH"] = res
+        return
+
+
 def _resolve_openclaw_cli_base() -> list[str]:
     """解析 openclaw CLI；打包为 exe 时禁止回退到 sys.executable，避免无限自启。"""
     exe = shutil.which("openclaw")
@@ -106,7 +144,7 @@ def run_openclaw_config_validate() -> tuple[bool, str]:
     base = _resolve_openclaw_cli_base()
     if not base:
         return True, "(跳过校验: 未找到 openclaw CLI)"
-    cmd = base + ["config", "validate"]
+    cmd = _win_subprocess_argv(base + ["config", "validate"])
     try:
         r = subprocess.run(
             cmd,
@@ -114,6 +152,8 @@ def run_openclaw_config_validate() -> tuple[bool, str]:
             text=True,
             timeout=90,
             env=os.environ.copy(),
+            encoding="utf-8",
+            errors="replace",
         )
     except (FileNotFoundError, OSError) as e:
         return True, f"(跳过校验: {e})"
@@ -639,12 +679,17 @@ class _CmdLogThread(QThread):
 
     def run(self) -> None:
         try:
+            cmd = self._cmd
+            if not self._shell and isinstance(cmd, list):
+                cmd = _win_subprocess_argv(list(cmd))
             p = subprocess.Popen(
-                self._cmd,
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 shell=self._shell,
             )
@@ -965,6 +1010,7 @@ class OpenClawProcessManager(QObject):
             self.state_changed.emit(False)
             return
         try:
+            cmd = _win_subprocess_argv(cmd)
             self.log_ready.emit(f"[OpenClaw] 执行: {' '.join(cmd)}")
             self._proc = subprocess.Popen(
                 cmd,
@@ -974,6 +1020,8 @@ class OpenClawProcessManager(QObject):
                 cwd=str(Path.home()),
                 env=os.environ.copy(),
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
             )
             if self._proc.stdout is None:
@@ -1111,12 +1159,16 @@ class OpenClawProcessManager(QObject):
                 self.log_ready.emit(f"[cmd] {' '.join(cmd)}")
             else:
                 self.log_ready.emit(f"[cmd] {cmd}")
+            if isinstance(cmd, list) and not shell:
+                cmd = _win_subprocess_argv(list(cmd))
             p = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 shell=shell,
             )
@@ -1784,7 +1836,11 @@ class MatrixPage(BoxClawPage):
             v.load(QUrl(DOU_HOT_URL))
 
     def _add_account(self) -> None:
-        raw, ok = QInputDialog.getText(self, "添加账号", "账号目录名（将创建在 ~/Douyin_Profiles 下）：")
+        raw, ok = QInputDialog.getText(
+            self,
+            "添加账号",
+            f"账号目录名（将创建在 {PROFILES_BASE_DIR} 下）：",
+        )
         if not ok:
             return
         name = sanitize_account_name(raw)
@@ -2921,33 +2977,16 @@ def main() -> None:
     if sys.stderr is None:
         sys.stderr = io.StringIO()
 
-    # 【终极救命补丁 2】：强制软件渲染 UI，彻底解决“不开兼容模式就进不去”的 GPU 渲染崩溃！
-    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+    # 【终极救命补丁 2】：仅 Windows 强制软件 OpenGL，避免与部分驱动冲突；macOS 保持默认 GPU 路径
+    if sys.platform == "win32":
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 
-    # 【终极救命补丁 3】：关闭沙箱，并强行给打包后“迷路”的 WebEngine 内核指明绝对路径
+    # 【终极救命补丁 3】：关闭沙箱，并在打包后若存在则设置 WebEngine 资源绝对路径
     os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
     if sys.platform == "win32":
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu"
-
-        # 针对 PyInstaller 打包后的路径修复
-        if getattr(sys, "frozen", False):
-            base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-            # 兼容不同 PyInstaller 版本的 _internal 目录结构
-            internal_dir = (
-                os.path.join(base_dir, "_internal")
-                if os.path.exists(os.path.join(base_dir, "_internal"))
-                else base_dir
-            )
-            pyside_dir = os.path.join(internal_dir, "PySide6")
-
-            os.environ["QTWEBENGINEPROCESS_PATH"] = os.path.join(
-                pyside_dir, "QtWebEngineProcess.exe"
-            )
-            os.environ["QTWEBENGINE_LOCALES_PATH"] = os.path.join(pyside_dir, "locales")
-            os.environ["QTWEBENGINE_RESOURCES_PATH"] = os.path.join(
-                pyside_dir, "resources"
-            )
+        _apply_windows_frozen_qtwebengine_paths()
 
     elif sys.platform == "darwin":
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-background-timer-throttling"
